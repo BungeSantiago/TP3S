@@ -10,46 +10,27 @@
  * Fetches the specified inode from the filesystem. 
  * Returns 0 on success, -1 on error.  
  */
-int inode_iget(struct unixfilesystem *fs, int inumber, struct inode *inp)
-{
-    if (!fs || !inp) {
-        return -1;                         // punteros inválidos
-    }
-
-    /* -------- rango válido del número de inodo ---------- */
+int inode_iget(struct unixfilesystem *fs, int inumber, struct inode *inp) {
     if (inumber < 1) {
-        return -1;                         // inode 0 no existe
+        return -1;
     }
 
-    const int INODES_PER_SECTOR = DISKIMG_SECTOR_SIZE / sizeof(struct inode);
+    int inodeBlock = ((inumber - 1) / (DISKIMG_SECTOR_SIZE / sizeof(struct inode))) + INODE_START_SECTOR;
+    struct inode buffer[DISKIMG_SECTOR_SIZE / sizeof(struct inode)];
 
-    /* Máximo número de inodo presente en el disco */
-    uint32_t max_inodes = fs->superblock.s_isize * INODES_PER_SECTOR;
-    if ((uint32_t)inumber > max_inodes) {
-        return -1;                         // fuera de rango
+    int bytes = diskimg_readsector(fs->dfd, inodeBlock, buffer);
+    if (bytes == -1) {
+        return -1;
     }
 
-    /* -------- localizar el sector y la entrada dentro del sector ---------- */
-    int idx        = inumber - 1;          // 0-based
-    int sectorOff  = idx / INODES_PER_SECTOR;
-    int entryOff   = idx % INODES_PER_SECTOR;
-    int sectorNum  = INODE_START_SECTOR + sectorOff;
+    int inodeIndex = (inumber - 1) % (DISKIMG_SECTOR_SIZE / sizeof(struct inode));
+    *inp = buffer[inodeIndex];
 
-    struct inode sectorBuf[INODES_PER_SECTOR];
-    int nread = diskimg_readsector(fs->dfd, sectorNum, sectorBuf);
-    if (nread != DISKIMG_SECTOR_SIZE) {    // incluye nread < 0
-        return -1;                         // I/O error
-    }
-
-    /* -------- copiar la entrada solicitada ---------- */
-    *inp = sectorBuf[entryOff];
-
-    // /* -------- verificar que el inodo esté asignado ---------- */
     // if ((inp->i_mode & IALLOC) == 0) {
-    //     return -1;                         // inodo libre
+    //     return -1;
     // }
 
-    return 0;                              // éxito
+    return 0;
 }
 
 
