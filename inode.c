@@ -51,61 +51,62 @@ int inode_iget(struct unixfilesystem *fs, int inumber, struct inode *inp) {
     return 0;                              // éxito	
 }
 
-/**
- * TODO
- */
-int inode_indexlookup(struct unixfilesystem *fs, struct inode *inp, int blockNum)
+
+int inode_indexlookup(struct unixfilesystem *fs,
+    struct inode *inp, int blockNum)
 {
-    if (!fs || !inp || blockNum < 0) {
-        return -1;                         // parámetros inválidos
-    }
+if (!fs || !inp || blockNum < 0) return -1;
 
-    /* --------------- Caso 1: archivo pequeño (direcciones directas) --------------- */
-    if ((inp->i_mode & ILARG) == 0) {      // bit ILARG apagado
-        if (blockNum >= 8) {               // sólo caben 8 entradas directas
-            return -1;
-        }
-        return inp->i_addr[blockNum];      // puede ser 0 si el bloque no existe
-    }
+/* --- nº de bloques que realmente existen en este archivo --- */
+int filesize = inode_getsize(inp);                    // bytes
+int fileblocks = (filesize + DISKIMG_SECTOR_SIZE-1) /
+   DISKIMG_SECTOR_SIZE;
+if (blockNum >= fileblocks)
+return -1;                                        // fuera de rango
 
-    /* --------------- Caso 2: archivo grande -------------------------------------- */
-    const int PTRS_PER_SECTOR = DISKIMG_SECTOR_SIZE / sizeof(uint16_t); // 256
-    const int SINGLE_INDIRECT  = 7 * PTRS_PER_SECTOR;                   // 1792
+const int PTRS_PER_SECTOR = DISKIMG_SECTOR_SIZE / sizeof(uint16_t); // 256
 
-    int fd = fs->dfd;
-
-    /* ---- 2a. Bloques cubiertos por los 7 indirectos simples ---- */
-    if (blockNum < SINGLE_INDIRECT) {
-        int idx1   = blockNum / PTRS_PER_SECTOR;    // qué indirecto (0-6)
-        int idx2   = blockNum % PTRS_PER_SECTOR;    // entrada dentro del indirecto
-
-        uint16_t firstLevelBuf[PTRS_PER_SECTOR];
-        int n = diskimg_readsector(fd, inp->i_addr[idx1], firstLevelBuf);
-        if (n != DISKIMG_SECTOR_SIZE) return -1;
-
-        return firstLevelBuf[idx2];                 // puede ser 0 si hueco
-    }
-
-    /* ---- 2b. Bloques cubiertos por el doblemente indirecto ---- */
-    int rel = blockNum - SINGLE_INDIRECT;           // índice relativo dentro del doble
-    int idx1 = rel / PTRS_PER_SECTOR;               // cuál de los 256 indirectos
-    int idx2 = rel % PTRS_PER_SECTOR;               // entrada dentro del indirecto
-
-    /* Primer nivel: leer el bloque doble indirecto */
-    uint16_t dblBuf[PTRS_PER_SECTOR];
-    int n1 = diskimg_readsector(fd, inp->i_addr[7], dblBuf); // i_addr[7] = doble
-    if (n1 != DISKIMG_SECTOR_SIZE) return -1;
-
-    uint16_t indirectSector = dblBuf[idx1];
-    if (indirectSector == 0) return -1;             // hueco no asignado
-
-    /* Segundo nivel: leer el bloque indirecto al que apunta la entrada anterior */
-    uint16_t secondBuf[PTRS_PER_SECTOR];
-    int n2 = diskimg_readsector(fd, indirectSector, secondBuf);
-    if (n2 != DISKIMG_SECTOR_SIZE) return -1;
-
-    return secondBuf[idx2];                         // 0 si el bloque no existe
+/* ------------- archivos “chicos” — 8 direcciones directas ------------- */
+if ((inp->i_mode & ILARG) == 0) {
+uint16_t phys = inp->i_addr[blockNum];
+return phys ? phys : -1;                          // 0 ⇒ hueco sin asignar
 }
+
+/* ------------- archivos “grandes” — 7 indirectos + 1 doble ------------- */
+const int SINGLE_MAX = 7 * PTRS_PER_SECTOR;           // 1792 bloques
+int fd = fs->dfd;
+
+if (blockNum < SINGLE_MAX) {          /* ➊ — indirectos simples */
+int l1 = blockNum / PTRS_PER_SECTOR;  // 0-6
+int l2 = blockNum % PTRS_PER_SECTOR;
+
+uint16_t table[PTRS_PER_SECTOR];
+if (inp->i_addr[l1] == 0) return -1;
+if (diskimg_readsector(fd, inp->i_addr[l1], table) != DISKIMG_SECTOR_SIZE)
+return -1;
+
+return table[l2] ? table[l2] : -1;
+}
+
+/* ➋ — doble indirecto */
+int rel   = blockNum - SINGLE_MAX;
+int l1    = rel / PTRS_PER_SECTOR;
+int l2    = rel % PTRS_PER_SECTOR;
+
+uint16_t dbl[PTRS_PER_SECTOR];
+if (inp->i_addr[7] == 0) return -1;
+if (diskimg_readsector(fd, inp->i_addr[7], dbl) != DISKIMG_SECTOR_SIZE)
+return -1;
+
+if (dbl[l1] == 0) return -1;          // agujero no asignado
+
+uint16_t ind[PTRS_PER_SECTOR];
+if (diskimg_readsector(fd, dbl[l1], ind) != DISKIMG_SECTOR_SIZE)
+return -1;
+
+return ind[l2] ? ind[l2] : -1;
+}
+
 
 
 int inode_getsize(struct inode *inp) {
