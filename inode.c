@@ -4,109 +4,76 @@
 #include "inode.h"
 #include "diskimg.h"
 
-#define INDIR_ADDR  7
+#define INDIR_ADDR 7
+
+/**
+ * Fetches the specified inode from the filesystem. 
+ * Returns 0 on success, -1 on error.  
+ */
+int inode_iget(struct unixfilesystem *fs, int inumber, struct inode *inp) {
+	// get offset of sector and inumber
+	inumber = inumber - 1;		// inumber starts from 1
+	int inode_num = DISKIMG_SECTOR_SIZE / sizeof(struct inode);
+	int sector_offset = inumber / inode_num;
+	int inumber_offset = inumber % inode_num;
+
+	// get contents of a sector
+	int fd = fs->dfd;
+	struct inode inodes[inode_num];
+	int err = diskimg_readsector(fd, INODE_START_SECTOR + sector_offset, inodes);
+	if(err < 0) return -1;
+	
+	// get contents of an inode
+	*inp = inodes[inumber_offset];
+
+	// return
+	return 0;	
+}
 
 
 /**
- * TODO
+ * Given an index of a file block, retrieves the file's actual block number
+ * of from the given inode.
+ *
+ * Returns the disk block number on success, -1 on error.  
  */
-int inode_iget(struct unixfilesystem *fs, int inumber, struct inode *inp) {
-    if (!fs || !inp) {
-        return -1;                         // punteros inválidos
-    }
+int inode_indexlookup(struct unixfilesystem *fs, struct inode *inp, int blockNum) {
+	int fd = fs->dfd;
+	int is_small_file = ((inp->i_mode & ILARG) == 0);
 
-    /* -------- rango válido del número de inodo ---------- */
-    if (inumber < 1) {
-        return -1;                         // inode 0 no existe
-    }
+	// if it is a small file
+	if(is_small_file) {
+		return inp->i_addr[blockNum];
+	}	
 
-    const int INODES_PER_SECTOR = DISKIMG_SECTOR_SIZE / sizeof(struct inode);
+	// if it is a large file
+	int addr_num = DISKIMG_SECTOR_SIZE / sizeof(uint16_t);
+	int indir_addr_num = addr_num * INDIR_ADDR;
+	if(blockNum < indir_addr_num) {		// if it only uses INDIR_ADDR
+		int sector_offset = blockNum / addr_num;
+		int addr_offset = blockNum % addr_num;
+		uint16_t addrs[addr_num];
+		int err = diskimg_readsector(fd, inp->i_addr[sector_offset], addrs);
+		if(err < 0) return -1;	
+		return addrs[addr_offset];
+	} else {							// if it also uses the DOUBLE_INDIR_ADDR
+		// the first layer
+		int blockNum_in_double = blockNum - indir_addr_num;
+		int sector_offset_1 = INDIR_ADDR;
+		int addr_offset_1 = blockNum_in_double / addr_num;
+		uint16_t addrs_1[addr_num];
+		int err_1 = diskimg_readsector(fd, inp->i_addr[sector_offset_1], addrs_1);
+		if(err_1 < 0) return -1;
 
-    /* Máximo número de inodo presente en el disco */
-    uint32_t max_inodes = fs->superblock.s_isize * INODES_PER_SECTOR;
-    if ((uint32_t)inumber > max_inodes) {
-        return -1;                         // fuera de rango
-    }
-
-    /* -------- localizar el sector y la entrada dentro del sector ---------- */
-    int idx        = inumber - 1;          // 0-based
-    int sectorOff  = idx / INODES_PER_SECTOR;
-    int entryOff   = idx % INODES_PER_SECTOR;
-    int sectorNum  = INODE_START_SECTOR + sectorOff;
-
-    struct inode sectorBuf[INODES_PER_SECTOR];
-    int nread = diskimg_readsector(fs->dfd, sectorNum, sectorBuf);
-    if (nread != DISKIMG_SECTOR_SIZE) {    // incluye nread < 0
-        return -1;                         // I/O error
-    }
-
-    /* -------- copiar la entrada solicitada ---------- */
-    *inp = sectorBuf[entryOff];
-
-    /* -------- verificar que el inodo esté asignado ---------- */
-    // if ((inp->i_mode & IALLOC) == 0) {
-    //     return -1;                         // inodo libre
-    // }
-
-    return 0;                              // éxito	
+		// the second layer
+		int sector_2 = addrs_1[addr_offset_1];
+		int addr_offset_2 = blockNum_in_double % addr_num;
+		uint16_t addrs_2[addr_num];
+		int err_2 = diskimg_readsector(fd, sector_2, addrs_2);
+		if(err_2 < 0) return -1;
+		return addrs_2[addr_offset_2];
+	}	
 }
-
-
-int inode_indexlookup(struct unixfilesystem *fs,
-    struct inode *inp, int blockNum)
-{
-if (!fs || !inp || blockNum < 0) return -1;
-
-/* --- nº de bloques que realmente existen en este archivo --- */
-int filesize = inode_getsize(inp);                    // bytes
-int fileblocks = (filesize + DISKIMG_SECTOR_SIZE-1) /
-   DISKIMG_SECTOR_SIZE;
-if (blockNum >= fileblocks)
-return -1;                                        // fuera de rango
-
-const int PTRS_PER_SECTOR = DISKIMG_SECTOR_SIZE / sizeof(uint16_t); // 256
-
-/* ------------- archivos “chicos” — 8 direcciones directas ------------- */
-if ((inp->i_mode & ILARG) == 0) {
-uint16_t phys = inp->i_addr[blockNum];
-return phys ? phys : -1;                          // 0 ⇒ hueco sin asignar
-}
-
-/* ------------- archivos “grandes” — 7 indirectos + 1 doble ------------- */
-const int SINGLE_MAX = 7 * PTRS_PER_SECTOR;           // 1792 bloques
-int fd = fs->dfd;
-
-if (blockNum < SINGLE_MAX) {          /* ➊ — indirectos simples */
-int l1 = blockNum / PTRS_PER_SECTOR;  // 0-6
-int l2 = blockNum % PTRS_PER_SECTOR;
-
-uint16_t table[PTRS_PER_SECTOR];
-if (inp->i_addr[l1] == 0) return -1;
-if (diskimg_readsector(fd, inp->i_addr[l1], table) != DISKIMG_SECTOR_SIZE)
-return -1;
-
-return table[l2] ? table[l2] : -1;
-}
-
-/* ➋ — doble indirecto */
-int rel   = blockNum - SINGLE_MAX;
-int l1    = rel / PTRS_PER_SECTOR;
-int l2    = rel % PTRS_PER_SECTOR;
-
-uint16_t dbl[PTRS_PER_SECTOR];
-if (inp->i_addr[7] == 0) return -1;
-if (diskimg_readsector(fd, inp->i_addr[7], dbl) != DISKIMG_SECTOR_SIZE)
-return -1;
-
-if (dbl[l1] == 0) return -1;          // agujero no asignado
-
-uint16_t ind[PTRS_PER_SECTOR];
-if (diskimg_readsector(fd, dbl[l1], ind) != DISKIMG_SECTOR_SIZE)
-return -1;
-
-return ind[l2] ? ind[l2] : -1;
-}
-
 
 
 int inode_getsize(struct inode *inp) {
