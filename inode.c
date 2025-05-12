@@ -10,70 +10,103 @@
  * Fetches the specified inode from the filesystem. 
  * Returns 0 on success, -1 on error.  
  */
-int inode_iget(struct unixfilesystem *fs, int inumber, struct inode *inp) {
-	// get offset of sector and inumber
-	inumber = inumber - 1;		// inumber starts from 1
-	int inode_num = DISKIMG_SECTOR_SIZE / sizeof(struct inode);
-	int sector_offset = inumber / inode_num;
-	int inumber_offset = inumber % inode_num;
+int inode_iget(struct unixfilesystem *fs, int inumber, struct inode *inp)
+{
+    if (!fs || !inp) {
+        return -1;                         // punteros inválidos
+    }
 
-	// get contents of a sector
-	int fd = fs->dfd;
-	struct inode inodes[inode_num];
-	int err = diskimg_readsector(fd, INODE_START_SECTOR + sector_offset, inodes);
-	if(err < 0) return -1;
-	
-	// get contents of an inode
-	*inp = inodes[inumber_offset];
+    /* -------- rango válido del número de inodo ---------- */
+    if (inumber < 1) {
+        return -1;                         // inode 0 no existe
+    }
 
-	// return
-	return 0;	
+    const int INODES_PER_SECTOR = DISKIMG_SECTOR_SIZE / sizeof(struct inode);
+
+    /* Máximo número de inodo presente en el disco */
+    uint32_t max_inodes = fs->superblock.s_isize * INODES_PER_SECTOR;
+    if ((uint32_t)inumber > max_inodes) {
+        return -1;                         // fuera de rango
+    }
+
+    /* -------- localizar el sector y la entrada dentro del sector ---------- */
+    int idx        = inumber - 1;          // 0-based
+    int sectorOff  = idx / INODES_PER_SECTOR;
+    int entryOff   = idx % INODES_PER_SECTOR;
+    int sectorNum  = INODE_START_SECTOR + sectorOff;
+
+    struct inode sectorBuf[INODES_PER_SECTOR];
+    int nread = diskimg_readsector(fs->dfd, sectorNum, sectorBuf);
+    if (nread != DISKIMG_SECTOR_SIZE) {    // incluye nread < 0
+        return -1;                         // I/O error
+    }
+
+    /* -------- copiar la entrada solicitada ---------- */
+    *inp = sectorBuf[entryOff];
+
+    // /* -------- verificar que el inodo esté asignado ---------- */
+    // if ((inp->i_mode & IALLOC) == 0) {
+    //     return -1;                         // inodo libre
+    // }
+
+    return 0;                              // éxito
 }
 
 
-/**
- * Given an index of a file block, retrieves the file's actual block number
- * of from the given inode.
- *
- * Returns the disk block number on success, -1 on error.  
- */
-int inode_indexlookup(struct unixfilesystem *fs, struct inode *inp, int blockNum) {
-	int fd = fs->dfd;
-	int is_small_file = ((inp->i_mode & ILARG) == 0);
 
-	// if it is a small file
-	if(is_small_file) {
-		return inp->i_addr[blockNum];
-	}	
+int inode_indexlookup(struct unixfilesystem *fs, struct inode *inp, int blockNum)
+{
+    if (!fs || !inp || blockNum < 0) {
+        return -1;                         // parámetros inválidos
+    }
 
-	// if it is a large file
-	int addr_num = DISKIMG_SECTOR_SIZE / sizeof(uint16_t);
-	int indir_addr_num = addr_num * INDIR_ADDR;
-	if(blockNum < indir_addr_num) {		// if it only uses INDIR_ADDR
-		int sector_offset = blockNum / addr_num;
-		int addr_offset = blockNum % addr_num;
-		uint16_t addrs[addr_num];
-		int err = diskimg_readsector(fd, inp->i_addr[sector_offset], addrs);
-		if(err < 0) return -1;	
-		return addrs[addr_offset];
-	} else {							// if it also uses the DOUBLE_INDIR_ADDR
-		// the first layer
-		int blockNum_in_double = blockNum - indir_addr_num;
-		int sector_offset_1 = INDIR_ADDR;
-		int addr_offset_1 = blockNum_in_double / addr_num;
-		uint16_t addrs_1[addr_num];
-		int err_1 = diskimg_readsector(fd, inp->i_addr[sector_offset_1], addrs_1);
-		if(err_1 < 0) return -1;
+    /* --------------- Caso 1: archivo pequeño (direcciones directas) --------------- */
+    if ((inp->i_mode & ILARG) == 0) {      // bit ILARG apagado
+        if (blockNum >= 8) {               // sólo caben 8 entradas directas
+            return -1;
+        }
+        return inp->i_addr[blockNum];      // puede ser 0 si el bloque no existe
+    }
 
-		// the second layer
-		int sector_2 = addrs_1[addr_offset_1];
-		int addr_offset_2 = blockNum_in_double % addr_num;
-		uint16_t addrs_2[addr_num];
-		int err_2 = diskimg_readsector(fd, sector_2, addrs_2);
-		if(err_2 < 0) return -1;
-		return addrs_2[addr_offset_2];
-	}	
+    /* --------------- Caso 2: archivo grande -------------------------------------- */
+    const int PTRS_PER_SECTOR = DISKIMG_SECTOR_SIZE / sizeof(uint16_t); // 256
+    const int SINGLE_INDIRECT  = 7 * PTRS_PER_SECTOR;                   // 1792
+
+    int fd = fs->dfd;
+
+    /* ---- 2a. Bloques cubiertos por los 7 indirectos simples ---- */
+    if (blockNum < SINGLE_INDIRECT) {
+        int idx1   = blockNum / PTRS_PER_SECTOR;    // qué indirecto (0-6)
+        int idx2   = blockNum % PTRS_PER_SECTOR;    // entrada dentro del indirecto
+
+        uint16_t firstLevelBuf[PTRS_PER_SECTOR];
+        int n = diskimg_readsector(fd, inp->i_addr[idx1], firstLevelBuf);
+        if (n != DISKIMG_SECTOR_SIZE) return -1;
+
+        return firstLevelBuf[idx2];                 // puede ser 0 si hueco
+    }
+
+    /* ---- 2b. Bloques cubiertos por el doblemente indirecto ---- */
+    int rel = blockNum - SINGLE_INDIRECT;           // índice relativo dentro del doble
+    int idx1 = rel / PTRS_PER_SECTOR;               // cuál de los 256 indirectos
+    int idx2 = rel % PTRS_PER_SECTOR;               // entrada dentro del indirecto
+
+    /* Primer nivel: leer el bloque doble indirecto */
+    uint16_t dblBuf[PTRS_PER_SECTOR];
+    int n1 = diskimg_readsector(fd, inp->i_addr[7], dblBuf); // i_addr[7] = doble
+    if (n1 != DISKIMG_SECTOR_SIZE) return -1;
+
+    uint16_t indirectSector = dblBuf[idx1];
+    if (indirectSector == 0) return -1;             // hueco no asignado
+
+    /* Segundo nivel: leer el bloque indirecto al que apunta la entrada anterior */
+    uint16_t secondBuf[PTRS_PER_SECTOR];
+    int n2 = diskimg_readsector(fd, indirectSector, secondBuf);
+    if (n2 != DISKIMG_SECTOR_SIZE) return -1;
+
+    return secondBuf[idx2];                         // 0 si el bloque no existe
 }
+
 
 
 int inode_getsize(struct inode *inp) {
