@@ -4,9 +4,6 @@
 #include "inode.h"
 #include "diskimg.h"
 
-#define INODE_START_SECTOR  2                           /* sector donde arrancan los i-nodos */
-#define SECTOR_SIZE          DISKIMG_SECTOR_SIZE     /* 512 bytes por sector */
-#define INODES_PER_SECTOR    (SECTOR_SIZE / sizeof(struct inode))
 #define INDIR_ADDR  7
 
 
@@ -14,33 +11,23 @@
  * TODO
  */
 int inode_iget(struct unixfilesystem *fs, int inumber, struct inode *inp) {
-    /* 1) Total de i-nodos disponibles según el superbloque */
-    int total_inodes = fs->superblock.s_isize * INODES_PER_SECTOR;
+	// get offset of sector and inumber
+	inumber = inumber - 1;		// inumber starts from 1
+	int inode_num = DISKIMG_SECTOR_SIZE / sizeof(struct inode);
+	int sector_offset = inumber / inode_num;
+	int inumber_offset = inumber % inode_num;
 
-    /* 2) Validación de rango [1 .. total_inodes] */
-    if (inumber < 1 || inumber > total_inodes) {
-        return -1;
-    }
+	// get contents of a sector
+	int fd = fs->dfd;
+	struct inode inodes[inode_num];
+	int err = diskimg_readsector(fd, INODE_START_SECTOR + sector_offset, inodes);
+	if(err < 0) return -1;
+	
+	// get contents of an inode
+	*inp = inodes[inumber_offset];
 
-    /* 3) Ajuste a índice base-0 */
-    int idx = inumber - 1;
-
-    /* 4) Cálculo de sector y desplazamiento dentro */
-    int sector = INODE_START_SECTOR + (idx / INODES_PER_SECTOR);
-    int offset = idx % INODES_PER_SECTOR;
-
-    /* 5) Buffer local de lectura */
-    struct inode buf[INODES_PER_SECTOR];
-
-    /* 6) Leer todo el sector de i-nodos */
-    if (diskimg_readsector(fs->dfd, sector, buf) < 0) {
-        return -1;
-    }
-
-    /* 7) Copiar el i-nodo solicitado */
-    *inp = buf[offset];
-
-    return 0;
+	// return
+	return 0;	
 }
 
 /**
