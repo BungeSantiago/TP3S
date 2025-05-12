@@ -44,9 +44,9 @@ int inode_iget(struct unixfilesystem *fs, int inumber, struct inode *inp) {
     *inp = sectorBuf[entryOff];
 
     /* -------- verificar que el inodo esté asignado ---------- */
-    if ((inp->i_mode & IALLOC) == 0) {
-        return -1;                         // inodo libre
-    }
+    // if ((inp->i_mode & IALLOC) == 0) {
+    //     return -1;                         // inodo libre
+    // }
 
     return 0;                              // éxito	
 }
