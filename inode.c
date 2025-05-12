@@ -7,13 +7,7 @@
 #define INODE_START_SECTOR  2                           /* sector donde arrancan los i-nodos */
 #define SECTOR_SIZE          DISKIMG_SECTOR_SIZE     /* 512 bytes por sector */
 #define INODES_PER_SECTOR    (SECTOR_SIZE / sizeof(struct inode))
-#define SECTOR_SIZE        DISKIMG_SECTOR_SIZE
-#define PTRS_PER_BLOCK ((int)(SECTOR_SIZE / sizeof(uint16_t)))
-#define INODE_DIRECT       8    /* número total de punteros en i_addr[] */
-#define INODE_SMALL_DIRECT 8    /* para archivos no ILARG usan los 8 directos */
-#define INODE_LARGE_DMIN   6    /* directos antes de indirecto simple */
-#define INODE_LARGE_SIND   6    /* índice de indirecto simple */
-#define INODE_LARGE_DIND   7    /* índice de indirecto doble */
+#define INDIR_ADDR  7
 
 
 /**
@@ -54,58 +48,41 @@ int inode_iget(struct unixfilesystem *fs, int inumber, struct inode *inp) {
  */
 int inode_indexlookup(struct unixfilesystem *fs, struct inode *inp,
     int blockNum) {  
-    /* 1) Calcular cuántos bloques tiene el fichero */
-    uint32_t filesize = ((uint32_t)inp->i_size0 << 16)
-                      | (uint32_t)inp->i_size1;
-    int total_blocks = (filesize + SECTOR_SIZE - 1) / SECTOR_SIZE;
-    if (blockNum < 0 || blockNum >= total_blocks)
-        return -1;
+    	int fd = fs->dfd;
+	int is_small_file = ((inp->i_mode & ILARG) == 0);
 
-    /* 2) Casos de fichero pequeño (sin ILARG) */
-    if ((inp->i_mode & ILARG) == 0) {
-        return inp->i_addr[blockNum];
-    }
+	// if it is a small file
+	if(is_small_file) {
+		return inp->i_addr[blockNum];
+	}	
 
-    /* 3) Fichero grande: directos, indirecto simple, indirecto doble */
-    /* 3a) Punteros directos (0..5) */
-    if (blockNum < INODE_LARGE_DMIN) {
-        return inp->i_addr[blockNum];
-    }
+	// if it is a large file
+	int addr_num = DISKIMG_SECTOR_SIZE / sizeof(uint16_t);
+	int indir_addr_num = addr_num * INDIR_ADDR;
+	if(blockNum < indir_addr_num) {		// if it only uses INDIR_ADDR
+		int sector_offset = blockNum / addr_num;
+		int addr_offset = blockNum % addr_num;
+		uint16_t addrs[addr_num];
+		int err = diskimg_readsector(fd, inp->i_addr[sector_offset], addrs);
+		if(err < 0) return -1;	
+		return addrs[addr_offset];
+	} else {							// if it also uses the DOUBLE_INDIR_ADDR
+		// the first layer
+		int blockNum_in_double = blockNum - indir_addr_num;
+		int sector_offset_1 = INDIR_ADDR;
+		int addr_offset_1 = blockNum_in_double / addr_num;
+		uint16_t addrs_1[addr_num];
+		int err_1 = diskimg_readsector(fd, inp->i_addr[sector_offset_1], addrs_1);
+		if(err_1 < 0) return -1;
 
-    /* 3b) Indirecto simple (bloques 6 .. 6+PTRS_PER_BLOCK-1) */
-    if (blockNum < INODE_LARGE_DMIN + PTRS_PER_BLOCK) {
-        uint16_t buf[PTRS_PER_BLOCK];
-        int err = diskimg_readsector(fs->dfd,
-                                     inp->i_addr[INODE_LARGE_SIND],
-                                     buf);
-        if (err < 0) return -1;
-        return buf[blockNum - INODE_LARGE_DMIN];
-    }
-
-    /* 3c) Indirecto doble */
-    {
-        int idx = blockNum - (INODE_LARGE_DMIN + PTRS_PER_BLOCK);
-        int first_idx = idx / PTRS_PER_BLOCK;
-        int second_idx = idx % PTRS_PER_BLOCK;
-
-        /* Leer bloque de punteros a bloques indirectos simples */
-        uint16_t buf1[PTRS_PER_BLOCK];
-        if (diskimg_readsector(fs->dfd,
-                               inp->i_addr[INODE_LARGE_DIND],
-                               buf1) < 0)
-            return -1;
-
-        uint16_t indirect_blk = buf1[first_idx];
-
-        /* Leer bloque indirecto simple concreto */
-        uint16_t buf2[PTRS_PER_BLOCK];
-        if (diskimg_readsector(fs->dfd,
-                               indirect_blk,
-                               buf2) < 0)
-            return -1;
-
-        return buf2[second_idx];
-    }
+		// the second layer
+		int sector_2 = addrs_1[addr_offset_1];
+		int addr_offset_2 = blockNum_in_double % addr_num;
+		uint16_t addrs_2[addr_num];
+		int err_2 = diskimg_readsector(fd, sector_2, addrs_2);
+		if(err_2 < 0) return -1;
+		return addrs_2[addr_offset_2];
+	}	
 }
 
 int inode_getsize(struct inode *inp) {
