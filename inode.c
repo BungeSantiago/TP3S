@@ -8,7 +8,7 @@
 #define SECTOR_SIZE          DISKIMG_SECTOR_SIZE     /* 512 bytes por sector */
 #define INODES_PER_SECTOR    (SECTOR_SIZE / sizeof(struct inode))
 #define SECTOR_SIZE        DISKIMG_SECTOR_SIZE
-#define PTRS_PER_BLOCK     (SECTOR_SIZE / sizeof(uint16_t))
+#define PTRS_PER_BLOCK ((int)(SECTOR_SIZE / sizeof(uint16_t)))
 #define INODE_DIRECT       8    /* número total de punteros en i_addr[] */
 #define INODE_SMALL_DIRECT 8    /* para archivos no ILARG usan los 8 directos */
 #define INODE_LARGE_DMIN   6    /* directos antes de indirecto simple */
