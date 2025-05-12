@@ -62,11 +62,8 @@ int inode_indexlookup(struct unixfilesystem *fs, struct inode *inp,
         return -1;
 
     /* 2) Casos de fichero pequeño (sin ILARG) */
-    if (!(inp->i_mode & ILARG)) {
-        if (blockNum < INODE_SMALL_DIRECT)
-            return inp->i_addr[blockNum];
-        else
-            return -1;
+    if ((inp->i_mode & ILARG) == 0) {
+        return inp->i_addr[blockNum];
     }
 
     /* 3) Fichero grande: directos, indirecto simple, indirecto doble */
