@@ -9,11 +9,9 @@
 
 int pathname_lookup(struct unixfilesystem *fs, const char *pathname)
 {
-    /* ---------- 1. Validaciones básicas ---------- */
     if (!fs || !pathname || pathname[0] != '/')
         return -1;
 
-    /* Ruta raíz */
     if (pathname[1] == '\0')
         return ROOT_INUMBER;                       /* / */
 
@@ -23,14 +21,12 @@ int pathname_lookup(struct unixfilesystem *fs, const char *pathname)
     int len = 0;
 
     while (1) {
-        /* Acumular caracteres de un componente */
         if (*p != '/' && *p != '\0') {
             if (len >= 14) return -1;              /* nombre muy largo */
             name[len++] = *p++;
             continue;
         }
 
-        /* Fin de componente */
         if (len == 0) return -1;                   /* shouldn't happen (no //) */
         name[len] = '\0';
 
@@ -40,7 +36,6 @@ int pathname_lookup(struct unixfilesystem *fs, const char *pathname)
 
         curr_inum = entry.d_inumber;
 
-        /* ¿Hay más componentes? */
         if (*p == '/') {
             /* Debe ser directorio */
             struct inode node;
@@ -53,8 +48,6 @@ int pathname_lookup(struct unixfilesystem *fs, const char *pathname)
             len = 0;                               /* reiniciar buffer nombre */
             continue;
         }
-
-        /* *p == '\0' ⇒ terminamos */
         break;
     }
 
